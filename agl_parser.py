@@ -91,53 +91,11 @@ def get_elevation(points):
     return elev
 
 
-def correct_altitude(images):
-    points = []
+def correct_altitude(points, images):
     new_folder = os.path.join('AGL_IMAGES')
     
     if not os.path.exists(new_folder):
         os.makedirs(new_folder)
-
-    for image in images:
-        with Image.open(image) as img:
-            exif_data = img._getexif()    
-            exif_table = {}
-            
-            for tag, value in exif_data.items():
-                decoded = TAGS.get(tag, tag)
-                exif_table[decoded] = value
-                
-            lat, lon = exif_table['GPSInfo'][2], exif_table['GPSInfo'][4]
-            lat = float(lat[0]) + float(lat[1]) / 60 + float(lat[2]) / 3600
-            lon = float(lon[0]) + float(lon[1]) / 60 + float(lon[2]) / 3600
-            if exif_table['GPSInfo'][1] == 'S':
-                lat = lat*-1
-            if exif_table['GPSInfo'][3] == 'W':
-                lon = lon*-1
-            alt_masl = float(exif_table['GPSInfo'][6])
-                
-            points.append((lat, lon, alt_masl))
-    
-    points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
-    
-    st.pydeck_chart(pdk.Deck(
-    map_style='mapbox://styles/mapbox/satellite-streets-v11',
-    initial_view_state=pdk.ViewState(
-        latitude=points_df['lat'].mean(),
-        longitude=points_df['lon'].mean(),
-        zoom=14,
-        pitch=0,
-     ),
-     layers=[
-         pdk.Layer(
-             'ScatterplotLayer',
-             data=points_df,
-             get_position='[lon, lat]',
-             get_color='[70, 130, 180, 200]',
-             get_radius=20,
-         ),
-         ],
-     ))
     
     corrected_elev = get_elevation(points)
     
@@ -206,9 +164,51 @@ def main():
             msg = 'One or more images are not in the correct format. Please check and reupload.'
             st.error(msg)
             st.stop()
+        
+        points = []
+        for image in uploaded_imgs:
+            with Image.open(image) as img:
+                exif_data = img._getexif()    
+                exif_table = {}
+                
+                for tag, value in exif_data.items():
+                    decoded = TAGS.get(tag, tag)
+                    exif_table[decoded] = value
+                    
+                lat, lon = exif_table['GPSInfo'][2], exif_table['GPSInfo'][4]
+                lat = float(lat[0]) + float(lat[1]) / 60 + float(lat[2]) / 3600
+                lon = float(lon[0]) + float(lon[1]) / 60 + float(lon[2]) / 3600
+                if exif_table['GPSInfo'][1] == 'S':
+                    lat = lat*-1
+                if exif_table['GPSInfo'][3] == 'W':
+                    lon = lon*-1
+                alt_masl = float(exif_table['GPSInfo'][6])
+                    
+                points.append((lat, lon, alt_masl))
+        
+        points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
+        
+        st.pydeck_chart(pdk.Deck(
+        map_style='mapbox://styles/mapbox/satellite-streets-v11',
+        initial_view_state=pdk.ViewState(
+            latitude=points_df['lat'].mean(),
+            longitude=points_df['lon'].mean(),
+            zoom=14,
+            pitch=0,
+         ),
+         layers=[
+             pdk.Layer(
+                 'ScatterplotLayer',
+                 data=points_df,
+                 get_position='[lon, lat]',
+                 get_color='[70, 130, 180, 200]',
+                 get_radius=20,
+             ),
+             ],
+         ))
     
         if st.button('CONVERT TO AGL'):
-            folder = correct_altitude(uploaded_imgs)
+            folder = correct_altitude(points, uploaded_imgs)
             zip_path = create_zip_file(folder)
             
             fp = open(zip_path, 'rb')
