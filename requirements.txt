@@ -7,7 +7,6 @@ keplergl
 leafmap
 localtileserver
 nbserverproxy
-PIL
 piexif
 rasterio
 scipy
