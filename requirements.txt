@@ -12,4 +12,3 @@ rasterio
 scipy
 streamlit
 streamlit-option-menu
-zipfile
