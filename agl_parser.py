@@ -4,6 +4,8 @@ import streamlit as st
 import zipfile
 import requests
 import numpy as np
+import pandas as pd
+import pydeck as pdk
 from PIL import Image
 from PIL.ExifTags import TAGS
 from scipy.interpolate import griddata
@@ -115,6 +117,27 @@ def correct_altitude(images):
             alt_masl = float(exif_table['GPSInfo'][6])
                 
             points.append((lat, lon, alt_masl))
+    
+    points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
+    
+    st.pydeck_chart(pdk.Deck(
+    map_style='mapbox://styles/mapbox/satellite-streets-v11',
+    initial_view_state=pdk.ViewState(
+        latitude=points_df['lat'].mean(),
+        longitude=points_df['lon'].mean(),
+        zoom=14,
+        pitch=0,
+     ),
+     layers=[
+         pdk.Layer(
+             'ScatterplotLayer',
+             data=points_df,
+             get_position='[lon, lat]',
+             get_color='[70, 130, 180, 200]',
+             get_radius=20,
+         ),
+         ],
+     ))
     
     corrected_elev = get_elevation(points)
     
