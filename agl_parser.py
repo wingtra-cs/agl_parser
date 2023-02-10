@@ -6,11 +6,11 @@ import requests
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+import matplotlib.pyplot as plt
 from PIL import Image
 from PIL.ExifTags import TAGS
 from scipy.interpolate import griddata
 from osgeo import gdal
-
 
 def interpolate_raster(file, lat, lon):
 
@@ -25,7 +25,7 @@ def interpolate_raster(file, lat, lon):
     column = (lon - transform[0]) / transform[1]
     row = (lat - transform[3]) / transform[5]
     
-    # Create a 5 x 5 grid of surrounding the point
+    # Create a 3 x 3 grid of surrounding the point
     surround_data = (band.ReadAsArray(np.floor(column-1), np.floor(row-1), 3, 3))
     lon_c = transform[0] + np.floor(column) * res
     lat_c = transform[3] - np.floor(row) * res
@@ -46,26 +46,9 @@ def interpolate_raster(file, lat, lon):
 
     return interp_val[0]
 
-def convert2orthometric(points):
-    ortho = []
-    aws = 'https://s3-eu-west-1.amazonaws.com/download.agisoft.com/gtg/'
-    egm2008_file = aws + 'us_nga_egm2008_1.tif'
-    
-    st.text('Converting to Orthometric...')
-    complete = 0.0
-    my_bar = st.progress(complete)
-    for la, lo, h in points:
-        N = interpolate_raster(egm2008_file, la, lo)
-        ortho.append(h - N)
-        complete += 1/len(points)
-        my_bar.progress(complete)
-    
-    return ortho
-
 def get_elevation(points):   
     lat = [x for x, y, z in points]
     lon = [y for x, y, z in points]
-    hgt = convert2orthometric(points)
     
     elev = []
     
@@ -75,48 +58,55 @@ def get_elevation(points):
     east = max(lon) + 0.01
     api_key = '9650231c82589578832a8851f1692a2e'
 
-    req = 'https://portal.opentopography.org/API/globaldem?demtype=SRTMGL3&south=' + str(south) + '&north=' + str(north) + '&west=' + str(west) + '&east=' + str(east) + '&outputFormat=GTiff&API_Key=' + api_key
-    resp = requests.get(req)
-    open('raster.tif', 'wb').write(resp.content)
-       
-    st.text('Converting to AGL from MASL...')
-    complete = 0.0
-    my_bar = st.progress(complete)
-    for x, h in enumerate(hgt):     
-        terrain = interpolate_raster('raster.tif', lat[x], lon[x])
-        elev.append(h - terrain)
-        complete += 1/len(points)
-        my_bar.progress(complete)
     
+    with st.spinner('Converting from MASL to AGL...'):
+        req = 'https://portal.opentopography.org/API/globaldem?demtype=SRTMGL3&south=' + str(south) + '&north=' + str(north) + '&west=' + str(west) + '&east=' + str(east) + '&outputFormat=GTiff&API_Key=' + api_key
+        resp = requests.get(req)
+        open('raster.tif', 'wb').write(resp.content)
+           
+        for la, lo, h in points:     
+            terrain = interpolate_raster('raster.tif', la, lo)
+            elev.append(h - terrain)
+    
+    st.success('Conversion Finished.')
     return elev
 
 
-def correct_altitude(points, images):
-    new_folder = os.path.join('AGL_IMAGES')
+def correct_altitude(points, images, flag):
+    new_folder = os.path.join('AGL_OUTPUT')
     
     if not os.path.exists(new_folder):
         os.makedirs(new_folder)
     
     corrected_elev = get_elevation(points)
     
-    for x, elev in enumerate(corrected_elev):
-        with Image.open(images[x]) as img:
-            exif_data = piexif.load(img.info['exif'])     
-            exif_data['GPS'][6] = (int(elev * 100), 100)         
-            new_image_path = os.path.join(new_folder, 'AGL_' + images[x].name)            
-            new_exif = exif_data
-            exif_bytes = piexif.dump(new_exif)           
+    if flag:
+        for x, elev in enumerate(corrected_elev):
             with Image.open(images[x]) as img:
-                img.save(new_image_path, exif=exif_bytes)
+                exif_data = piexif.load(img.info['exif'])     
+                exif_data['GPS'][6] = (int(elev * 100), 100)         
+                new_image_path = os.path.join(new_folder, 'AGL_' + images[x].name)            
+                new_exif = exif_data
+                exif_bytes = piexif.dump(new_exif)           
+                with Image.open(images[x]) as img:
+                    img.save(new_image_path, exif=exif_bytes)
     
-    return new_folder
+    return new_folder, corrected_elev
 
-def create_zip_file(folder):
-    zip_file_path = 'AGL_IMAGES.zip'
-    with zipfile.ZipFile(zip_file_path, 'w') as myzip:
-        for image_name in os.listdir(os.path.join('AGL_IMAGES')):
-            myzip.write(os.path.join('AGL_IMAGES', image_name), arcname=image_name)
+def create_zip_file(folder, geotags, flag):
+    zip_file_path = 'AGL_OUTPUT.zip'
     
+    csv_name = '_'.join(geotags['# image name' ][0].split('_')[:-1])+'_AGL.csv'
+    
+    with st.spinner('Zipping file outputs...'):
+        with zipfile.ZipFile(zip_file_path, 'w') as myzip:
+            myzip.writestr(csv_name, geotags.to_csv(index=False).encode('utf-8'))
+            if flag:
+                for image_name in os.listdir(os.path.join('AGL_OUTPUT')):
+                    myzip.write(os.path.join('AGL_OUTPUT', image_name), arcname=image_name)
+                    
+      
+    st.success('Outputs are now ready for download.')
     return zip_file_path
     
                 
@@ -130,24 +120,35 @@ def main():
     st.sidebar.image('./logo.png', width = 260)
     st.sidebar.markdown('#')
     st.sidebar.write('The application rewrites the EXIF data to embed AGL instead of ellipsoidal height.')
+    st.sidebar.write('It requires the Geotags CSV and, if desired, the geotagged images as well.')
     st.sidebar.markdown('#')
     st.sidebar.info('This is a prototype application. Wingtra AG does not guarantee correct functionality. Use with discretion.')
     # Upload button for Images
     
-    uploaded_imgs = st.file_uploader('Please Select Geotagged Images.', accept_multiple_files=True)
+    uploaded_files = st.file_uploader('Select all relevant files in the OUTPUT folder.', accept_multiple_files=True)
     uploaded = False
     
-    for uploaded_img in uploaded_imgs: 
-        if uploaded_img is not None:
+    for uploaded_file in uploaded_files: 
+        if uploaded_file is not None:
             uploaded = True
+            if uploaded_file.name.split('.')[-1] == 'csv':
+                geotags_all = pd.read_csv(uploaded_file, index_col=False)
     
     if uploaded:
         # Geotagging and Format Check
-        
         format_check = True
         points = []
-        for image in uploaded_imgs:
-            try:
+        included_images = []
+        image_flag = True
+        
+        imgs = [x for x in uploaded_files if x.name.split('.')[-1] == 'JPG']
+        
+        if len(imgs) == 0:
+            st.write('No images uploaded. Only the geotags CSV will be converted')
+            image_flag = False
+        
+        else:
+            for image in imgs:         
                 with Image.open(image) as img:
                     exif_data = img._getexif()
                     exif_table = {}
@@ -156,29 +157,37 @@ def main():
                         decoded = TAGS.get(tag, tag)
                         exif_table[decoded] = value
                     
-                    lat, lon = exif_table['GPSInfo'][2], exif_table['GPSInfo'][4]
-                    lat = float(lat[0]) + float(lat[1]) / 60 + float(lat[2]) / 3600
-                    lon = float(lon[0]) + float(lon[1]) / 60 + float(lon[2]) / 3600
-                    if exif_table['GPSInfo'][1] == 'S':
-                        lat = lat*-1
-                    if exif_table['GPSInfo'][3] == 'W':
-                        lon = lon*-1
-                    alt_masl = float(exif_table['GPSInfo'][6])
+                    if 'GPSInfo' not in exif_table.keys():
+                        msg = f'{image.name} is not in the correct format.'
+                        st.text(msg)
+                        format_check = False   
                         
-                    points.append((lat, lon, alt_masl))                    
-            except (AttributeError, KeyError):
-                msg = f'{image.name} is not in the correct format.'
-                st.text(msg)
-                format_check = False
+                    included_images.append(image.name)
         
+        if geotags_all.empty:
+            st.text('No geotags CSV file uploaded.')
         if not format_check:
-            msg = 'One or more images are not in the correct format. Please check and reupload.'
+            msg = 'One or more files are not in the correct format or upload is incomplete. Please check and reupload.'
             st.error(msg)
             st.stop()
+        elif format_check and image_flag:
+            msg = f'Successfully uploaded {len(included_images)} images.'
+            st.success(msg)
         else:
-            msg = f'Successfully uploaded {len(points)} images.'
-            st.success(msg)                
+            msg = f'Geotags CSV successfully uploaded. There are {len(geotags_all)} captures.'
+            st.success(msg)
         
+        fname = '# image name'              
+        lat = 'latitude [decimal degrees]'
+        lon = 'longitude [decimal degrees]'
+        hgt = 'altitude [meter]'
+        if image_flag:
+            geotags = geotags_all[geotags_all[fname].isin(included_images)]
+        else:
+            geotags = geotags_all.copy()
+        
+        points = list(zip(geotags[lat], geotags[lon], geotags[hgt]))
+            
         points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
         
         st.pydeck_chart(pdk.Deck(
@@ -201,14 +210,33 @@ def main():
          ))
     
         if st.button('CONVERT TO AGL'):
-            folder = correct_altitude(points, uploaded_imgs)
-            zip_path = create_zip_file(folder)
+            folder, elev = correct_altitude(points, imgs, image_flag)
+            
+            if image_flag:
+                new_names = ['AGL_'+x for x in geotags[fname].tolist()]
+                geotags[fname] = new_names
+            
+            geotags[hgt] = elev
+            geotags.rename(columns={hgt:'AGL [meter]'}, inplace=True)
+            
+            fig, ax = plt.subplots()
+            fig.set_size_inches(5, 2)
+            ax.plot(range(1,len(geotags)+1), geotags['AGL [meter]'])
+            ax.set_xlabel('Image #', size=5)
+            max_x = len(geotags)+1
+            ax.set_xticks(range(1,max_x, int(max_x/10)))
+            ax.set_ylabel('AGL (meters)', size=5)
+            max_y = int(geotags['AGL [meter]'].max()+10)
+            ax.set_yticks(range(0, max_y, int(max_y/10)))
+            st.pyplot(fig)
+            
+            zip_path = create_zip_file(folder, geotags, image_flag)
             
             fp = open(zip_path, 'rb')
             st.download_button(
-                label="Download Converted Images",
+                label="Download Outputs of Conversion",
                 data=fp,
-                file_name='AGL_IMAGES.zip',
+                file_name='AGL_OUTPUT.zip',
                 mime='application/zip',
             )
     
