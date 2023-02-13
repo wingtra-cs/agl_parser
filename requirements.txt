@@ -13,3 +13,4 @@ scipy
 streamlit
 streamlit-option-menu
 utm
+xmltodict
