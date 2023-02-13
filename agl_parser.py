@@ -6,7 +6,12 @@ import requests
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+import geopandas as gpd
 import matplotlib.pyplot as plt
+import utm
+import math
+import xmltodict
+from shapely.geometry import Polygon, MultiPolygon
 from PIL import Image
 from PIL.ExifTags import TAGS
 from scipy.interpolate import griddata
@@ -46,9 +51,26 @@ def interpolate_raster(file, lat, lon):
 
     return interp_val[0]
 
-def get_elevation(points):   
+def convert2egm(points):
+    egm96_file = 'us_nga_egm96_15.tif'
+    
+    final_points = []
+    with st.spinner('Converting from ellipsoidal to orthoetric...'):
+        for la, lo, h in points:
+            h_masl = h - interpolate_raster(egm96_file, la, lo)
+            final_points.append((la, lo, h_masl))
+        
+    st.success('Preliminary Conversion Finished.')
+    
+    return final_points
+
+def get_elevation(points, ppk):   
     lat = [x for x, y, z in points]
     lon = [y for x, y, z in points]
+    
+    if ppk:
+         points_new = convert2egm(points)
+         points = points_new
     
     elev = []
     
@@ -71,37 +93,134 @@ def get_elevation(points):
     st.success('Conversion Finished.')
     return elev
 
+def generate_footprint(lat, lon, agl, roll, pitch, yaw):
+    img_param = [35.8, 23.9, 35, 0]
+    utm_conv = utm.from_latlon(lat, lon)
+    utm_points = (utm_conv[0], utm_conv[1])
+    utm_zone1 = utm_conv[2]
+    utm_zone2 = utm_conv[3]
+    
+    sensor_x = img_param[0]
+    sensor_y = img_param[1]
+    f = img_param[2]
+        
+    hfv = 2*math.atan(sensor_x/(2*f))
+    vfv = 2*math.atan(sensor_y/(2*f))
+    
+    foot = []
+    for y in range(0,4):
+        if y == 0:
+            dx = math.tan(hfv/2 + pitch)*agl
+            dy = math.tan(vfv/2 + roll)*agl
+            dutm_x = dx*math.cos(yaw) - dy*math.sin(yaw)
+            dutm_y = -dx*math.sin(yaw) - dy*math.cos(yaw)
+            utm_x = utm_points[0] + dutm_x
+            utm_y = utm_points[1] + dutm_y
+            
+            lat_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[0]
+            lon_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[1]
+            foot.append([lon_point, lat_point])
+            
+        elif y == 1:
+            dx = math.tan(-hfv/2 + pitch)*agl
+            dy = math.tan(vfv/2 + roll)*agl
+            dutm_x = dx*math.cos(yaw) - dy*math.sin(yaw)
+            dutm_y = -dx*math.sin(yaw) - dy*math.cos(yaw)
+            utm_x = utm_points[0] + dutm_x
+            utm_y = utm_points[1] + dutm_y
+            
+            lat_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[0]
+            lon_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[1]
+            foot.append([lon_point, lat_point])    
+            
+        elif y == 2:
+            dx = math.tan(-hfv/2 + pitch)*agl
+            dy = math.tan(-vfv/2 + roll)*agl
+            dutm_x = dx*math.cos(yaw) - dy*math.sin(yaw)
+            dutm_y = -dx*math.sin(yaw) - dy*math.cos(yaw)
+            utm_x = utm_points[0] + dutm_x
+            utm_y = utm_points[1] + dutm_y
+            
+            lat_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[0]
+            lon_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[1]
+            foot.append([lon_point, lat_point])  
+            
+        elif y == 3:
+            dx = math.tan(hfv/2 + pitch)*agl
+            dy = math.tan(-vfv/2 + roll)*agl
+            dutm_x = dx*math.cos(yaw) - dy*math.sin(yaw)
+            dutm_y = -dx*math.sin(yaw) - dy*math.cos(yaw)
+            utm_x = utm_points[0] + dutm_x
+            utm_y = utm_points[1] + dutm_y
+            
+            lat_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[0]
+            lon_point = utm.to_latlon(utm_x, utm_y, utm_zone1, utm_zone2)[1]
+            foot.append([lon_point, lat_point])
+        
+    poly = Polygon(foot)
+    
+    return poly
 
-def correct_altitude(points, images, flag):
+def correct_altitude(points, images, flag, ppk):
     new_folder = os.path.join('AGL_OUTPUT')
+    lat = [x for x, y, z in points]
+    lon = [y for x, y, z in points]
+    names = [image.name for image in images]
     
     if not os.path.exists(new_folder):
         os.makedirs(new_folder)
     
-    corrected_elev = get_elevation(points)
+    corrected_elev = get_elevation(points, ppk)
+    
+    footprints = []
     
     if flag:
-        for x, elev in enumerate(corrected_elev):
-            with Image.open(images[x]) as img:
-                exif_data = piexif.load(img.info['exif'])     
-                exif_data['GPS'][6] = (int(elev * 100), 100)         
-                new_image_path = os.path.join(new_folder, 'AGL_' + images[x].name)            
-                new_exif = exif_data
-                exif_bytes = piexif.dump(new_exif)           
+        with st.spinner('Calculating image footprints...'):
+            for x, elev in enumerate(corrected_elev):          
                 with Image.open(images[x]) as img:
+                    exif_data = piexif.load(img.info['exif'])     
+                    exif_data['GPS'][6] = (int(elev * 100), 100)         
+                    new_image_path = os.path.join(new_folder, 'AGL_' + images[x].name)            
+                    new_exif = exif_data
+                    exif_bytes = piexif.dump(new_exif)
                     img.save(new_image_path, exif=exif_bytes)
+                    
+                    temp = img.applist
+                    d = str(temp[1][1])
+                        
+                    xmp_start = d.find('<x:xmpmeta')
+                    xmp_end = d.find('</x:xmpmeta')
+                    xmp_str = d[xmp_start:xmp_end+12]
+                    
+                    xmp = xmltodict.parse(xmp_str)
+                    
+                    roll = float(xmp['x:xmpmeta']['rdf:RDF']['rdf:Description']['@Camera:Roll'])*(math.pi/180)
+                    pitch = float(xmp['x:xmpmeta']['rdf:RDF']['rdf:Description']['@Camera:Pitch'])*(math.pi/180)
+                    yaw = float(xmp['x:xmpmeta']['rdf:RDF']['rdf:Description']['@Camera:Yaw'])*(math.pi/180)
+                    
+                    footprints.append(generate_footprint(lat[x], lon[x], elev, roll, pitch, yaw))
+        
+        st.success('Image Footprints Generated.')
+        footprints_geom = list(MultiPolygon(footprints).geoms)
+        footprints_gdf = gpd.GeoDataFrame(list(zip(names,lat,lon,corrected_elev,footprints_geom)), index=range(len(images)), 
+                                          columns=['Image', 'Latitude', 'Longitude', 'AGL', 'geometry'], crs="EPSG:4326")
+    else:
+        footprints_gdf = gpd.GeoDataFrame()
     
-    return new_folder, corrected_elev
+    return new_folder, corrected_elev, footprints_gdf
 
-def create_zip_file(folder, geotags, flag):
+def create_zip_file(folder, geotags, prints, flag):
     zip_file_path = 'AGL_OUTPUT.zip'
     
     csv_name = '_'.join(geotags['# image name' ][0].split('_')[:-1])+'_AGL.csv'
+    shp_name = '_'.join(geotags['# image name' ][0].split('_')[:-1])+'_FOV.shp.zip'
     
     with st.spinner('Zipping file outputs...'):
         with zipfile.ZipFile(zip_file_path, 'w') as myzip:
             myzip.writestr(csv_name, geotags.to_csv(index=False).encode('utf-8'))
             if flag:
+                prints.to_file(shp_name, driver='ESRI Shapefile')
+                myzip.write(shp_name)
                 for image_name in os.listdir(os.path.join('AGL_OUTPUT')):
                     myzip.write(os.path.join('AGL_OUTPUT', image_name), arcname=image_name)
                     
@@ -177,6 +296,19 @@ def main():
             msg = f'Geotags CSV successfully uploaded. There are {len(geotags_all)} captures.'
             st.success(msg)
         
+        geotagging = st.selectbox('Select Geotagging Type:', 
+                                 ('<Select>',
+                                  'PPK Geotagging',
+                                  'Non-PPK Geotagging'))
+                    
+        ppk = True
+        if geotagging != '<Select>':
+            st.write(geotagging + ' selected.')
+            if geotagging == 'Non-PPK Geotagging':
+                ppk = False
+        else:
+            st.stop()
+        
         fname = '# image name'              
         lat = 'latitude [decimal degrees]'
         lon = 'longitude [decimal degrees]'
@@ -187,30 +319,9 @@ def main():
             geotags = geotags_all.copy()
         
         points = list(zip(geotags[lat], geotags[lon], geotags[hgt]))
-            
-        points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
-        
-        st.pydeck_chart(pdk.Deck(
-        map_style='mapbox://styles/mapbox/satellite-streets-v11',
-        initial_view_state=pdk.ViewState(
-            latitude=points_df['lat'].mean(),
-            longitude=points_df['lon'].mean(),
-            zoom=14,
-            pitch=0,
-         ),
-         layers=[
-             pdk.Layer(
-                 'ScatterplotLayer',
-                 data=points_df,
-                 get_position='[lon, lat]',
-                 get_color='[70, 130, 180, 200]',
-                 get_radius=20,
-             ),
-             ],
-         ))
     
         if st.button('CONVERT TO AGL'):
-            folder, elev = correct_altitude(points, imgs, image_flag)
+            folder, elev, prints = correct_altitude(points, imgs, image_flag, ppk)
             
             if image_flag:
                 new_names = ['AGL_'+x for x in geotags[fname].tolist()]
@@ -219,18 +330,55 @@ def main():
             geotags[hgt] = elev
             geotags.rename(columns={hgt:'AGL [meter]'}, inplace=True)
             
-            fig, ax = plt.subplots()
-            fig.set_size_inches(5, 2)
-            ax.plot(range(1,len(geotags)+1), geotags['AGL [meter]'])
-            ax.set_xlabel('Image #', size=5)
-            max_x = len(geotags)+1
-            ax.set_xticks(range(1,max_x, int(max_x/10)))
-            ax.set_ylabel('AGL (meters)', size=5)
-            max_y = int(geotags['AGL [meter]'].max()+10)
-            ax.set_yticks(range(0, max_y, int(max_y/10)))
-            st.pyplot(fig)
+            points_df = pd.DataFrame(data=points, columns=['lat', 'lon', 'alt'])
             
-            zip_path = create_zip_file(folder, geotags, image_flag)
+            with st.spinner('Visualizing Data...'):
+                st.pydeck_chart(pdk.Deck(
+                map_style='mapbox://styles/mapbox/satellite-streets-v11',
+                initial_view_state=pdk.ViewState(
+                    latitude=points_df['lat'].mean(),
+                    longitude=points_df['lon'].mean(),
+                    zoom=14,
+                    pitch=0,
+                 ),
+                 layers=[
+                     pdk.Layer(
+                         'GeoJsonLayer',
+                         data=prints['geometry'],
+                         get_fill_color='[39, 157, 245]',
+                         get_line_color='[39, 157, 245]',
+                         opacity=0.1,
+                         pickable=True,
+                     ),
+                     pdk.Layer(
+                         'ScatterplotLayer',
+                         data=points_df,
+                         opacity=0.7,
+                         get_position='[lon, lat]',
+                         get_color='[0,0,0]',
+                         get_radius=5,
+                         pickable=True
+                     ),
+                     ],        
+                 ))
+                
+                fig, ax = plt.subplots()
+                fig.set_size_inches(5, 2)
+                ax.plot(range(1,len(geotags)+1), geotags['AGL [meter]'])
+                ax.tick_params(axis='both', which='major', labelsize=5)
+                ax.set_xlabel('Image #', size=5)
+                max_x = len(geotags)+1
+                if max_x > 40:
+                    x_step = 10**(len(str(max_x))-1)
+                else:
+                    x_step = 1
+                ax.set_xticks(range(1,max_x, x_step))
+                ax.set_ylabel('AGL (meters)', size=5)
+                max_y = int(geotags['AGL [meter]'].max()+10)
+                ax.set_yticks(range(0, max_y, int(max_y/10)))
+                st.pyplot(fig)
+            
+            zip_path = create_zip_file(folder, geotags, prints, image_flag)
             
             fp = open(zip_path, 'rb')
             st.download_button(
